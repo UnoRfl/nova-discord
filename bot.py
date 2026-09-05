@@ -4,10 +4,12 @@ Unlike the one-off REST calls that came before, this holds an open gateway
 connection, so the bot stays green in the member list until you stop it.
 """
 
+import json
 import logging
 import os
 import re
 import sys
+from pathlib import Path
 
 import discord
 from discord.ext import commands
@@ -54,6 +56,10 @@ async def on_ready():
     for guild in bot.guilds:
         log.info("  in guild: %s (%s members)", guild.name, guild.member_count)
     log.info("claude exe: %s", nova_claude.CLAUDE or "NOT FOUND — chat replies disabled")
+    log.info("join-to-create hubs: %s",
+             ", ".join(getattr(bot.get_channel(h), "name", str(h)) for h in HUBS)
+             or "none set (use /novahub)")
+    await sweep_rooms()
     await bot.change_presence(
         activity=discord.Game(name="watching over Ulupongs")
     )
@@ -92,25 +98,85 @@ async def on_ready():
 # A hub channel that hands each arrival their own room. This cannot live in the
 # actions file: it is not a change to make once, it is a rule that has to be
 # there every time somebody joins.
-HUBS: set[int] = set()
-SPAWNED: set[int] = set()
+HUBS_FILE = Path.home() / ".nova" / "discord-hubs.json"
+SPAWNED_FILE = Path.home() / ".nova" / "discord-rooms.json"
+
+
+def _load_hubs() -> set:
+    """Which channels are hubs. On disk, because an in-memory set forgets the
+    whole arrangement every time the bot restarts -- and the bot restarts."""
+    try:
+        return set(json.loads(HUBS_FILE.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return set()
+
+
+def _save_hubs() -> None:
+    try:
+        HUBS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        HUBS_FILE.write_text(json.dumps(sorted(HUBS)), encoding="utf-8")
+    except OSError as exc:
+        log.warning("could not save hubs: %s", exc)
+
+
+def _load_rooms() -> set:
+    try:
+        return set(json.loads(SPAWNED_FILE.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return set()
+
+
+def _save_rooms() -> None:
+    try:
+        SPAWNED_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SPAWNED_FILE.write_text(json.dumps(sorted(SPAWNED)), encoding="utf-8")
+    except OSError as exc:
+        log.warning("could not save rooms: %s", exc)
+
+
+HUBS: set = _load_hubs()
+# Which rooms are ours to delete. Also on disk: forgetting this list does not
+# lose a room, it strands one -- an empty channel nobody owns, left behind by
+# every restart that happened while somebody was in a call.
+SPAWNED: set[int] = _load_rooms()
+
+
+async def sweep_rooms():
+    """Bin the rooms that emptied while we were down."""
+    for rid in sorted(SPAWNED):
+        ch = bot.get_channel(rid)
+        if ch is None:                      # already gone
+            SPAWNED.discard(rid)
+        elif not ch.members:
+            SPAWNED.discard(rid)
+            try:
+                await ch.delete()
+                log.info("swept the empty room %s", ch.name)
+            except discord.DiscordException as exc:
+                log.warning("could not sweep %s: %s", ch.name, exc)
+    _save_rooms()
 
 
 @bot.event
 async def on_voice_state_update(member, before, after):
     try:
         if after.channel and after.channel.id in HUBS:
-            room = await after.channel.category.create_voice_channel(
-                f"{member.display_name}'s room",
+            # A hub sitting outside any category has category None, and asking
+            # None to make a channel is how this used to fall over.
+            where = after.channel.category or member.guild
+            room = await where.create_voice_channel(
+                f"{member.display_name}'s VC",
                 bitrate=after.channel.bitrate,
                 user_limit=after.channel.user_limit)
             SPAWNED.add(room.id)
+            _save_rooms()
             await member.move_to(room)
             log.info("made a room for %s", member.display_name)
 
         # Last one out turns off the lights.
         if before.channel and before.channel.id in SPAWNED and not before.channel.members:
             SPAWNED.discard(before.channel.id)
+            _save_rooms()
             await before.channel.delete()
     except discord.DiscordException as exc:
         log.warning("join-to-create: %s", exc)

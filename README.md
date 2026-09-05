@@ -33,6 +33,8 @@ polite requests in a system prompt:
 | **ask** | a role you name | **you approve the prompt first**, then it runs sandboxed |
 | **blocked** | everyone else | refused — this is the default |
 
+![How a request is gated](docs/images/trust-model.svg)
+
 ### Sandboxed means sandboxed
 
 Not "the prompt says please don't". Enforced by the CLI:
@@ -92,8 +94,11 @@ sandboxed runs are never even told the mechanism exists.
 
 **Run the server.** Create channels and roles, rename, set topics, assign
 roles, edit colours and permissions. `/novahub` turns any voice channel into a
-join-to-create hub that hands each arrival their own room and cleans up after
-them.
+join-to-create hub: each arrival gets their own room named after them and is
+moved into it, and the room is binned when the last person leaves. Both the hub
+list and the rooms it made are kept on disk — otherwise a restart forgets which
+channel was the hub, and strands every room that was occupied at the time. On
+reconnect she sweeps up the ones that emptied while she was down.
 
 **Refuse to do the irreversible quietly.** Deleting a channel or role, or
 purging messages, is *proposed* — you get a plain sentence and a button:
@@ -107,10 +112,16 @@ to delete a year of conversation on. `administrator` is not on the grantable
 permission list and never will be — it's every other permission at once,
 handed out by a sentence somebody typed.
 
-**Run a game.** Ask for a dungeon crawl and the brevity rule is suspended. She
-tracks state and honours it — health, inventory, who's dead, which door was
-locked and who has the key — ends every turn with real options and waits,
-rolls honestly, and treats multiple people in a channel as multiple players.
+**Run a game.** `/novaplay game:a dungeon crawl under a drowned cathedral`
+suspends the brevity rule and starts one. She tracks state and honours it —
+health, inventory, who's dead, which door was locked and who has the key —
+ends every turn with real options and waits, rolls honestly, and treats
+multiple people in a channel as multiple players. `/novaplay` with nothing in
+it ends the game.
+
+It's a command rather than a mood she falls into because those rules are ~300
+tokens, and paying them on every *"what time is it"* is 300 tokens for nothing.
+They load when a game starts and not before.
 
 **Keep herself alive.** `watch.ps1` restarts her if she dies, with exponential
 backoff so a bad token doesn't spin the CPU. `install-task.ps1` registers it at
@@ -142,6 +153,7 @@ silently and never appear — nothing in the code can work around that.
 |---|---|
 | `/promptnova` | ask her to build something |
 | `/novachat` | decide who she may talk to |
+| `/novaplay` | start a game here, or end it |
 | `/novahub` | turn a voice channel into join-to-create |
 | `/novasetup` | your tier, your model, your limits |
 | `!ping` `!whereami` | is she alive, and where |

@@ -313,6 +313,43 @@ def setup(bot):
         finally:
             BUSY.discard(user.id)
 
+    @bot.tree.command(name="novaplay", description="Start or end a game in this channel")
+    @app_commands.describe(game="What to play, or leave empty to end the current one")
+    async def novaplay(interaction: discord.Interaction, game: str = ""):
+        import nova_claude
+        key = f"ch:{interaction.channel.id}"
+
+        # Checked before either branch: ending someone else's game halfway
+        # through is grief, not a null action, so it needs the same standing
+        # as starting one.
+        roles = {str(r.id) for r in getattr(interaction.user, "roles", [])}
+        if not nova_agent.may_chat(interaction.user.id, roles):
+            await interaction.response.send_message(
+                "You are not on the list for this.", ephemeral=True)
+            return
+
+        if not game:
+            was_playing = nova_claude.PLAYING.pop(key, None)
+            nova_claude.SESSIONS.pop(key, None)     # the story ends with it
+            await interaction.response.send_message(
+                "Game over. Back to business." if was_playing
+                else "Nothing is running here. `/novaplay game:<something>` starts one.")
+            return
+
+        await interaction.response.defer(thinking=True)
+        nova_claude.PLAYING[key] = True
+        nova_claude.SESSIONS.pop(key, None)         # a new game starts clean
+        opening = ("Begin a new game for the people in this channel: " + game +
+                   " Set the scene, then give them their first real choices and stop.")
+        is_owner = str(interaction.user.id) == nova_agent.OWNER_ID
+        answer = await nova_claude.ask(opening, key, False,
+                                       nova_claude.model_for(is_owner))
+        for i, piece in enumerate(nova_claude.chunk(answer)):
+            if i == 0:
+                await interaction.followup.send(piece)
+            else:
+                await interaction.channel.send(piece)
+
     @bot.tree.command(name="novahub", description="Make a voice channel hand out private rooms")
     @app_commands.describe(channel="The voice channel to use as the hub")
     async def novahub(interaction: discord.Interaction, channel: discord.VoiceChannel):
@@ -322,10 +359,12 @@ def setup(bot):
         import bot as botmod
         if channel.id in botmod.HUBS:
             botmod.HUBS.discard(channel.id)
+            botmod._save_hubs()
             await interaction.response.send_message(
                 f"**{channel.name}** is an ordinary voice channel again.", ephemeral=True)
             return
         botmod.HUBS.add(channel.id)
+        botmod._save_hubs()
         await interaction.response.send_message(
             f"**{channel.name}** now gives everyone who joins their own room. "
             f"Run this again to turn it off.", ephemeral=True)
