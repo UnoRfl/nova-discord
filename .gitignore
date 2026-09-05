@@ -1,0 +1,10 @@
+# The token is a live credential; the logs contain conversations.
+.env
+*.log
+*.log.1
+*.pid
+
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
