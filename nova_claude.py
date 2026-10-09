@@ -141,9 +141,17 @@ def game_rules(key: str) -> str:
 
 
 def find_claude():
-    """Locate claude.exe: PATH first, then the desktop app's bundled copy."""
+    """Locate claude.exe: npm's native binary, PATH, then the desktop app's copy.
+
+    A PATH hit on Windows is usually npm's claude.cmd shim, which routes the
+    arguments - Discord users' text - through cmd.exe and its & | % parsing.
+    The real .exe sits next to it, so use that instead.
+    """
+    npm_exe = HOME / "AppData/Roaming/npm/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
+    if npm_exe.is_file():
+        return str(npm_exe)
     found = which("claude")
-    if found:
+    if found and found.lower().endswith(".exe"):
         return found
     packages = HOME / "AppData/Local/Packages"
     if not packages.is_dir():
