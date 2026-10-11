@@ -4,6 +4,7 @@ Unlike the one-off REST calls that came before, this holds an open gateway
 connection, so the bot stays green in the member list until you stop it.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -40,6 +41,7 @@ log = logging.getLogger("nova")
 import nova_claude  # noqa: E402
 import nova_agent   # noqa: E402
 import nova_slash   # noqa: E402
+import nova_pc      # noqa: E402
 
 intents = discord.Intents.default()
 intents.message_content = True  # needs "Message Content Intent" on in the portal
@@ -74,6 +76,7 @@ async def on_ready():
     if not SLASH_READY:
         try:
             nova_slash.setup(bot)
+            nova_pc.setup(bot)
             SLASH_READY = True
         except Exception:
             log.exception("could not register slash commands")
@@ -89,9 +92,20 @@ async def on_ready():
         except discord.DiscordException as exc:
             log.warning("  slash sync failed for %s: %s", guild.name, exc)
 
+    nova_claude.NOTIFY = notify_owner
+    asyncio.create_task(nova_pc.refresh(force=True))
+
     swept = nova_agent.sweep()
     if swept:
         log.info("cleared %d old job folder(s)", swept)
+
+
+async def notify_owner(text: str):
+    """DM Uno directly -- for failures he would otherwise only see in the log."""
+    if not nova_claude.OWNER_ID:
+        return
+    user = bot.get_user(int(nova_claude.OWNER_ID)) or await bot.fetch_user(int(nova_claude.OWNER_ID))
+    await user.send(f"Sir, something needs your attention: {text}")
 
 
 # --- join to create -------------------------------------------------------
@@ -311,7 +325,7 @@ async def on_message(message: discord.Message):
     async with message.channel.typing():
         is_owner = str(message.author.id) == nova_agent.OWNER_ID
         answer = await nova_claude.ask(framed, conversation_key(message), privileged,
-                                       nova_claude.model_for(is_owner))
+                                       nova_claude.model_for(is_owner), owner=is_owner)
 
     for index, piece in enumerate(nova_claude.chunk(answer)):
         if index == 0:

@@ -23,8 +23,8 @@ NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 WORKDIR = os.getenv("NOVA_WORKDIR", str(HOME))
 # Uno gets the good one; everyone else gets the cheap one. His questions are
 # the ones worth thinking hard about, and he is the one paying for the plan.
-OWNER_MODEL = os.getenv("NOVA_OWNER_MODEL", "claude-opus-5")
-GUEST_MODEL = os.getenv("NOVA_GUEST_MODEL", "claude-haiku-4-5-20251001")
+OWNER_MODEL = os.getenv("NOVA_OWNER_MODEL", "claude-opus-5-5")
+GUEST_MODEL = os.getenv("NOVA_GUEST_MODEL", "claude-haiku-5-5")
 
 # Kept as names so the rest of the code never has to know which is which.
 MODEL = GUEST_MODEL          # default when nobody says
@@ -40,6 +40,15 @@ OWNER_NAME = os.getenv("NOVA_OWNER_NAME", "Uno").strip() or "Uno"
 OWNER_HANDLE = os.getenv("NOVA_OWNER_HANDLE", "UnoRfl").strip() or "UnoRfl"
 
 READ_TOOLS = ["Read", "Glob", "Grep", "WebSearch", "WebFetch"]
+
+# Guests chat from an empty room with no file tools at all. The persona asks
+# the model not to reveal things; this makes sure there is nothing to reveal --
+# no .env, no saved logins, nothing in the home folder. Same idea as the
+# /promptnova jail in nova_agent.py.
+GUEST_ROOM = HOME / ".nova" / "guest-room"
+GUEST_TOOLS = ["WebSearch", "WebFetch"]
+GUEST_DENY = ["Read", "Glob", "Grep", "Bash", "Write", "Edit", "NotebookEdit",
+              "Task", "Agent"]
 
 _PERSONA = """You are NOVA, a household assistant answering inside a Discord server.
 
@@ -191,19 +200,31 @@ def live_session(key: str) -> str:
     return sid
 
 
-def _run(prompt: str, key: str, privileged: bool, model: str = "") -> str:
-    """Blocking. One CLI call, resuming this channel's session if it has one."""
+def _run(prompt: str, key: str, privileged: bool, model: str = "",
+         owner: bool = False) -> tuple[str, str]:
+    """Blocking. One CLI call, resuming this channel's session if it has one.
+
+    Returns (answer, alert) -- alert is non-empty when Uno should hear about a
+    failure directly instead of finding it in the log days later.
+    """
     args = [CLAUDE, "-p", prompt,
             "--output-format", "json",
             "--model", model or MODEL,
-            "--add-dir", WORKDIR,
             "--append-system-prompt", PERSONA + essentials() + game_rules(key)]
 
     if privileged:
-        args += ["--permission-mode", "bypassPermissions"]
-    else:
-        args += ["--allowedTools"] + READ_TOOLS
+        args += ["--add-dir", WORKDIR, "--permission-mode", "bypassPermissions"]
+        cwd = WORKDIR
+    elif owner:
+        # Uno in a server channel: he can look things up, but nothing changes.
+        args += ["--add-dir", WORKDIR, "--allowedTools"] + READ_TOOLS
         args += ["--disallowedTools", "Bash", "Write", "Edit", "NotebookEdit"]
+        cwd = WORKDIR
+    else:
+        GUEST_ROOM.mkdir(parents=True, exist_ok=True)
+        args += ["--allowedTools"] + GUEST_TOOLS
+        args += ["--disallowedTools"] + GUEST_DENY
+        cwd = str(GUEST_ROOM)
 
     session = live_session(key)
     if session:
@@ -212,40 +233,63 @@ def _run(prompt: str, key: str, privileged: bool, model: str = "") -> str:
     try:
         done = subprocess.run(args, capture_output=True, text=True,
                               encoding="utf-8", errors="replace",
-                              timeout=TIMEOUT, cwd=WORKDIR,
+                              timeout=TIMEOUT, cwd=cwd,
                               creationflags=NO_WINDOW,
                               stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
-        return "That took longer than I am willing to keep you waiting. Ask it more narrowly."
+        return "That took longer than I am willing to keep you waiting. Ask it more narrowly.", ""
 
     raw = (done.stdout or "").strip()
     if not raw:
-        log.error("claude returned nothing: %s", (done.stderr or "")[:400])
-        return "Nothing came back. Something on this end is unwell."
+        err = (done.stderr or "")[:400]
+        log.error("claude returned nothing: %s", err)
+        return "Nothing came back. Something on this end is unwell.", "claude returned nothing: " + err
 
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError:
-        return raw[:1800]
+        return raw[:1800], ""
 
     if payload.get("session_id"):
         SESSIONS[key] = (payload["session_id"], time.time())
 
     text = (payload.get("result") or "").strip()
     if payload.get("is_error") or not text:
-        if "Not logged in" in text:
-            return "Claude is not signed in on this machine, so I have nothing to think with."
+        log.error("claude error: %s", text[:400])
+        if "logged in" in text.lower() or "authenticate" in text.lower():
+            return ("Claude is not signed in on this machine, so I have nothing to think with.",
+                    "Claude CLI is signed out: " + text[:200])
         # A stale session id is the usual culprit; drop it so the next try is clean.
         SESSIONS.pop(key, None)
-        log.error("claude error: %s", text[:400])
-        return "That did not go through. Ask again and I will start from a clean slate."
+        return "That did not go through. Ask again and I will start from a clean slate.", ""
 
-    return text
+    return text, ""
 
 
-async def ask(prompt: str, key: str, privileged: bool = False, model: str = "") -> str:
+# One turn at a time per conversation. Two messages resuming the same session
+# at once fork it, and one of the two replies loses the thread.
+_LOCKS: dict[str, asyncio.Lock] = {}
+
+# Set by bot.py: an async callable that DMs Uno. Throttled so a dead login
+# sends one message an hour, not one per question.
+NOTIFY = None
+ALERT_EVERY = 3600
+_last_alert = {"at": 0.0}
+
+
+async def ask(prompt: str, key: str, privileged: bool = False, model: str = "",
+              owner: bool = False) -> str:
     """Await an answer without blocking the gateway heartbeat."""
-    return await asyncio.to_thread(_run, prompt, key, privileged, model)
+    lock = _LOCKS.setdefault(key, asyncio.Lock())
+    async with lock:
+        text, alert = await asyncio.to_thread(_run, prompt, key, privileged, model, owner)
+    if alert and NOTIFY and time.time() - _last_alert["at"] > ALERT_EVERY:
+        _last_alert["at"] = time.time()
+        try:
+            await NOTIFY(alert)
+        except Exception:
+            log.exception("could not alert the owner")
+    return text
 
 
 def chunk(text: str, size: int = 1900):

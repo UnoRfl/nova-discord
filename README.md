@@ -156,6 +156,8 @@ silently and never appear — nothing in the code can work around that.
 | `/novaplay` | start a game here, or end it |
 | `/novahub` | turn a voice channel into join-to-create |
 | `/novasetup` | your tier, your model, your limits |
+| `/getfile` | owner only: send a file or zipped folder from the PC (no tokens) |
+| `/launch` | owner only: open an app or shortcut on the PC (no tokens) |
 | `!ping` `!whereami` | is she alive, and where |
 
 ---
