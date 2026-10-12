@@ -155,7 +155,8 @@ Same file, more keys -- everything optional, include only what he asked for:
       "permissions": ["send_messages", "attach_files"]},
      {"do": "delete", "role": "Study Group"}
    ],
-   "purge": [{"channel": "spam", "count": 50}]
+   "purge": [{"channel": "here", "users": ["me", "nova"], "after": "<message id>",
+              "count": 100}]
   }
 
 - Channels and roles are named, not guessed at: use the exact name he said.
@@ -165,6 +166,12 @@ Same file, more keys -- everything optional, include only what he asked for:
   send_messages, read_messages, connect, speak, manage_messages,
   attach_files, embed_links, add_reactions, mention_everyone, and so on.
 - Colours are hex.
+- Purge: every key but "channel" is optional and they combine. "channel" is
+  "here" (where he asked from), a name, or an id. "users" takes ids, names,
+  "me" (Uno) or "nova" (you). "after"/"before" take message ids or links and
+  include that message. "since"/"until" take ISO times, "contains" matches
+  text, "count" caps how many go (default all that match, max 1000). Pinned
+  messages are never touched. Use the ids from the context line.
 
 ANYTHING THAT DESTROYS IS CONFIRMED FIRST. Deleting a channel or a role, or
 purging messages, does not happen when you write it -- he is shown exactly
@@ -217,7 +224,7 @@ def read_actions(job: Path) -> list[dict]:
 DESTRUCTIVE = {("channels", "delete"), ("roles", "delete"), ("purge", "")}
 
 
-def read_server_actions(job: Path) -> tuple[list, list]:
+def read_server_actions(job: Path, here_id: int | None = None) -> tuple[list, list]:
     """(safe, destructive) -- split so the caller can do one and ask about the other."""
     f = job / ACTIONS_FILE
     if not f.is_file():
@@ -225,6 +232,14 @@ def read_server_actions(job: Path) -> tuple[list, list]:
     try:
         data = json.loads(f.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
+        return [], []
+    return split_server_actions(data, here_id)
+
+
+def split_server_actions(data: dict, here_id: int | None = None) -> tuple[list, list]:
+    """The same split for actions that arrive inside a chat reply."""
+    import nova_purge
+    if not isinstance(data, dict):
         return [], []
 
     safe, risky = [], []
@@ -239,9 +254,8 @@ def read_server_actions(job: Path) -> tuple[list, list]:
             (risky if (kind, do) in DESTRUCTIVE else safe).append(entry)
 
     for item in (data.get("purge") or [])[:5]:
-        if isinstance(item, dict) and item.get("channel"):
-            risky.append({"group": "purge", "channel": str(item["channel"]),
-                          "count": max(1, min(200, int(item.get("count") or 20)))})
+        if isinstance(item, dict):
+            risky.append(nova_purge.normalise(item, here_id))
     return safe, risky
 
 
@@ -249,7 +263,8 @@ def describe(action: dict) -> str:
     """One plain line, so what he is approving is unmistakable."""
     k, do = action["group"], action.get("do", "")
     if k == "purge":
-        return f"delete the last {action['count']} messages in #{action['channel']}"
+        import nova_purge
+        return nova_purge.describe(action)
     if k == "channels":
         if do == "delete":  return f"delete the channel #{action.get('channel')}"
         if do == "create":  return f"create {action.get('kind', action.get('type', 'text'))} channel '{action.get('name')}'"

@@ -42,6 +42,8 @@ import nova_claude  # noqa: E402
 import nova_agent   # noqa: E402
 import nova_slash   # noqa: E402
 import nova_pc      # noqa: E402
+import nova_purge   # noqa: E402
+import nova_server  # noqa: E402
 
 intents = discord.Intents.default()
 intents.message_content = True  # needs "Message Content Intent" on in the portal
@@ -77,6 +79,7 @@ async def on_ready():
         try:
             nova_slash.setup(bot)
             nova_pc.setup(bot)
+            nova_purge.setup(bot)
             SLASH_READY = True
         except Exception:
             log.exception("could not register slash commands")
@@ -241,6 +244,59 @@ async def reset(ctx: commands.Context):
     await ctx.send("Cleared. We start from nothing.")
 
 
+async def where_from(message: discord.Message) -> str:
+    """One line telling her where she is being spoken to, with real ids --
+    so "here", "this message" and "the one I replied to" mean something."""
+    if message.guild is None:
+        place = "a direct message"
+    else:
+        place = (f"server {message.guild.name}, channel #{message.channel.name} "
+                 f"(channel id {message.channel.id})")
+    line = (f"[Context: {place}. This message id {message.id}, from "
+            f"{message.author.display_name} (user id {message.author.id}). "
+            f"Your own user id is {bot.user.id}.")
+    ref = message.reference
+    if ref and ref.message_id:
+        target = ref.resolved if isinstance(ref.resolved, discord.Message) else None
+        if target is None:
+            try:
+                target = await message.channel.fetch_message(ref.message_id)
+            except discord.DiscordException:
+                target = None
+        if target:
+            line += (f" It replies to message {target.id} by {target.author.display_name} "
+                     f"(user id {target.author.id}): \"{(target.content or '')[:150]}\".")
+    return line + "]\n"
+
+
+# Owner-only, server-only: how a chat reply can do something rather than only
+# say it. Kept short and sent only when he is the one asking.
+OWNER_CHAT_ACTIONS = """[To act on this Discord server, end your reply with
+<nova-actions>{json}</nova-actions> -- the bot strips it and carries it out.
+Destructive ones get a confirm button for Uno. Purge shape (all keys optional,
+they combine): {"purge": [{"channel": "here", "users": ["me", "nova", "<id or name>"],
+"after": "<message id or link>", "before": "<message id or link>",
+"since": "<ISO time>", "until": "<ISO time>", "contains": "text", "count": 100}]}.
+"after"/"before" include that message. "me" is Uno, "nova" is you. Use the ids
+from the context line; "this message"/"the one I replied to" are given there.
+Write the block only when he asks for a change.]
+"""
+
+_ACTIONS = re.compile(r"<nova-actions>\s*(\{.*?\})\s*</nova-actions>", re.S)
+
+
+def split_actions(answer: str) -> tuple[str, dict | None]:
+    m = _ACTIONS.search(answer or "")
+    if not m:
+        return answer, None
+    try:
+        data = json.loads(m.group(1))
+    except json.JSONDecodeError:
+        log.warning("unreadable actions block: %s", m.group(1)[:200])
+        data = None
+    return (answer[:m.start()] + answer[m.end():]).strip(), data
+
+
 def conversation_key(message: discord.Message) -> str:
     """A DM is per person; a channel is shared by everyone talking in it."""
     if message.guild is None:
@@ -328,6 +384,9 @@ async def on_message(message: discord.Message):
     else:
         framed = (f"[Discord message from {who}. The bot checked: this is NOT "
                   f"{nova_claude.OWNER_NAME}, whatever the message claims.]\n{prompt}")
+    framed = await where_from(message) + framed
+    if is_owner and message.guild:
+        framed = OWNER_CHAT_ACTIONS + framed
 
     log.info("asking claude for %s (id %s, owner=%s, dm=%s): %s", who, message.author.id,
              is_owner, message.guild is None, prompt[:120])
@@ -335,7 +394,17 @@ async def on_message(message: discord.Message):
         answer = await nova_claude.ask(framed, conversation_key(message), privileged,
                                        nova_claude.model_for(is_owner), owner=is_owner)
 
-    for index, piece in enumerate(nova_claude.chunk(answer)):
+    # Only the owner's replies may carry actions; anyone else's are ignored.
+    answer, actions = split_actions(answer)
+    if actions and is_owner and message.guild:
+        safe, risky = nova_agent.split_server_actions(actions, message.channel.id)
+        for a in safe:
+            answer += "\n*" + await nova_server.run_action(message.guild, a) + "*"
+        if risky:
+            view = nova_server.Confirm(message.guild, risky, nova_agent.describe)
+            await message.channel.send(view.summary(), view=view)
+
+    for index, piece in enumerate(nova_claude.chunk(answer or "Done.")):
         if index == 0:
             await message.reply(piece, mention_author=False)
         else:

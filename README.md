@@ -158,6 +158,8 @@ silently and never appear — nothing in the code can work around that.
 | `/novasetup` | your tier, your model, your limits |
 | `/getfile` | owner only: send a file or zipped folder from the PC (no tokens) |
 | `/launch` | owner only: open an app or shortcut on the PC (no tokens) |
+| `/purge` | owner only: delete messages here by person, from/to a message, or by text |
+| right-click a message → Apps | owner only: *Purge from here down*, *Purge their messages here* |
 | `!ping` `!whereami` | is she alive, and where |
 
 ---

@@ -48,7 +48,13 @@ async def execute(interaction_user, channel, prompt: str, jailed: bool, note: st
         # Identity comes from the bot, never from the message. A prompt that
         # claims to be Uno is just a prompt claiming to be Uno.
         who = nova_agent.identity(interaction_user.display_name, is_owner)
-        framed = f"[Requested on Discord by {interaction_user.display_name}]\n\n{prompt}"
+        where = ""
+        if getattr(channel, "guild", None):
+            where = (f"[Context: server {channel.guild.name}, channel #{channel.name} "
+                     f"(channel id {channel.id}). Asked by {interaction_user.display_name} "
+                     f"(user id {interaction_user.id}). Your own user id is "
+                     f"{channel.guild.me.id}. \"here\" means this channel.]\n")
+        framed = f"[Requested on Discord by {interaction_user.display_name}]\n{where}\n{prompt}"
         import nova_claude
         text = await nova_agent.run(framed, job, jailed, who,
                                     nova_claude.model_for(is_owner))
@@ -66,7 +72,7 @@ async def execute(interaction_user, channel, prompt: str, jailed: bool, note: st
 
             # Server changes: the safe ones happen now, the irreversible ones
             # are put in front of him with a button and a plain description.
-            safe, risky = nova_agent.read_server_actions(job)
+            safe, risky = nova_agent.read_server_actions(job, channel.id)
             for a in safe:
                 done = await nova_server.run_action(channel.guild, a)
                 note = note + "*" + done + "*\n"

@@ -74,11 +74,8 @@ async def run_action(guild, act: dict) -> str:
     group, do = act["group"], act.get("do", "")
     try:
         if group == "purge":
-            ch = find_channel(guild, act["channel"])
-            if not ch:
-                return f"no channel `{act['channel']}`"
-            gone = await ch.purge(limit=act["count"])
-            return f"deleted {len(gone)} messages in #{ch.name}"
+            import nova_purge
+            return await nova_purge.run(guild, act, guild.me)
 
         if group == "channels":
             if do == "create":
@@ -168,8 +165,19 @@ class Confirm(discord.ui.View):
         self.guild, self.actions, self.describe = guild, actions, describe
         self.done = False
 
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Only Uno presses these. Anyone in the channel can see the buttons."""
+        import nova_purge
+        if nova_purge.is_owner(interaction.user):
+            return True
+        await interaction.response.send_message("Only Uno can approve this.", ephemeral=True)
+        return False
+
     def summary(self) -> str:
-        lines = "\n".join(f"• {self.describe(a)}" for a in self.actions)
+        import nova_purge
+        lines = "\n".join(
+            f"• {nova_purge.describe(a, self.guild) if a['group'] == 'purge' else self.describe(a)}"
+            for a in self.actions)
         return f"**This cannot be undone.** Nova proposes:\n{lines}"
 
     async def _close(self, interaction, verdict):
